@@ -1,0 +1,16 @@
+Alice Chen
+alice.chen@example.com — Berlin, Germany (remote preferred)
+
+Senior Backend Engineer with 7 years of experience building distributed systems in Go.
+
+Experience
+- Staff Engineer, ScaleCorp (2022–present): led the design of a multi-region order
+  processing platform (Go, Kubernetes, Kafka). Mentored a team of 5 engineers.
+- Senior Engineer, CloudWorks (2019–2022): built gRPC microservices handling 50k rps;
+  introduced consensus-based leader election (Raft) for the scheduling layer.
+- Engineer, StartupXYZ (2017–2019): full-stack work, later specialized in backend.
+
+Skills: Go, Kubernetes, Kafka, gRPC, PostgreSQL, Raft, distributed systems, system design
+
+Education: BSc Computer Science, TU Berlin
+Languages: English (fluent), German (native), Mandarin (conversational)
