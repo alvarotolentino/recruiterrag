@@ -26,6 +26,9 @@ models/
 .env.*
 !.env.example
 
+# Docs
+docs/spec.md
+
 # IDE / OS
 .vscode/
 .idea/
