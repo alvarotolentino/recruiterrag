@@ -1,0 +1,5 @@
+# Milvus override config (loaded on top of the image's milvus.yaml).
+# Only show ERROR-level logs — the standalone boot/restart sequence is otherwise
+# extremely chatty with transient WARN reconnect noise.
+log:
+  level: error

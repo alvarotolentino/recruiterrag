@@ -1,0 +1,184 @@
+# Cap container log files so verbose services (milvus, ollama) can't fill the disk.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+
+  ollama:
+    image: ollama/ollama:latest
+    logging: *default-logging
+    volumes:
+      - ollama_data:/root/.ollama
+    ports:
+      - "11434:11434"
+    environment:
+      # Keep the model resident so bursty recruiter usage doesn't pay a ~50s cold
+      # reload each time. Set to a duration ("30m") or -1 to keep loaded forever.
+      OLLAMA_KEEP_ALIVE: ${OLLAMA_KEEP_ALIVE:-30m}
+    # For GPU acceleration, add the overlay: see docs/GPU.md (docker-compose.gpu.yml).
+    healthcheck:
+      test: ["CMD", "ollama", "ls"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+
+  ollama-init:
+    image: ollama/ollama:latest
+    logging: *default-logging
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+    # LLM_MODEL is shared with the api service; override in a .env file to use a
+    # lighter model (e.g. LLM_MODEL=qwen3:4b) on machines with limited RAM.
+    entrypoint: >
+      sh -c "ollama pull ${LLM_MODEL:-qwen3:8b} &&
+             ollama pull ${EMBED_MODEL:-nomic-embed-text}"
+    restart: "no"
+
+  milvus:
+    image: milvusdb/milvus:v2.4.15
+    logging: *default-logging
+    command: ["milvus", "run", "standalone"]
+    environment:
+      ETCD_USE_EMBED: "true"
+      ETCD_DATA_DIR: /var/lib/milvus/etcd
+      ETCD_CONFIG_PATH: /milvus/configs/embedEtcd.yaml
+      COMMON_STORAGETYPE: local
+    volumes:
+      - milvus_data:/var/lib/milvus
+      - ./scripts/embedEtcd.yaml:/milvus/configs/embedEtcd.yaml
+      # user.yaml overrides milvus.yaml — sets log level to ERROR (quiets the
+      # very chatty WARN/INFO boot + reconnect noise).
+      - ./scripts/milvus-user.yaml:/milvus/configs/user.yaml
+    ports:
+      - "19530:19530"
+      - "9091:9091"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+
+  storage:
+    image: minio/minio:latest
+    logging: *default-logging
+    command: server /data --console-address ":9001" --quiet
+    environment:
+      MINIO_ROOT_USER: recruiterrag
+      MINIO_ROOT_PASSWORD: recruiterrag
+    volumes:
+      - minio_data:/data
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  api:
+    build: ./backend
+    logging: *default-logging
+    depends_on:
+      ollama:
+        condition: service_healthy
+      milvus:
+        condition: service_healthy
+      storage:
+        condition: service_healthy
+    environment:
+      OLLAMA_BASE_URL: http://ollama:11434
+      MILVUS_HOST: milvus
+      MILVUS_PORT: "19530"
+      MINIO_ENDPOINT: storage:9000
+      MINIO_ACCESS_KEY: recruiterrag
+      MINIO_SECRET_KEY: recruiterrag
+      DATABASE_URL: sqlite:////data/recruiterrag.db
+      INFERENCE_BACKEND: ollama
+      LLAMACPP_BASE_URL: http://llamacpp:8080
+      TRAINER_BASE_URL: http://trainer:8500
+      LLM_MODEL: ${LLM_MODEL:-qwen3:8b}
+      EMBED_MODEL: ${EMBED_MODEL:-nomic-embed-text}
+      LLM_TIMEOUT: ${LLM_TIMEOUT:-900}
+      EMBED_TIMEOUT: ${EMBED_TIMEOUT:-300}
+      LLM_MAX_INPUT_CHARS: ${LLM_MAX_INPUT_CHARS:-16000}
+      SCORING_CONCURRENCY: ${SCORING_CONCURRENCY:-3}
+    volumes:
+      - db_data:/data
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  ui:
+    build: ./frontend
+    logging: *default-logging
+    depends_on:
+      - api
+    ports:
+      - "3000:3000"
+    environment:
+      VITE_API_URL: http://localhost:8000
+
+  llamacpp:
+    image: ghcr.io/ggml-org/llama.cpp:server
+    logging: *default-logging
+    volumes:
+      - model_data:/models
+    ports:
+      - "8080:8080"
+    profiles:
+      - finetuned
+    command: >
+      -m /models/base.gguf
+      --lora /models/adapter.gguf
+      --port 8080
+      --host 0.0.0.0
+      -c 4096
+
+  trainer:
+    build: ./trainer
+    logging: *default-logging
+    depends_on:
+      - storage
+    profiles:
+      - training
+    environment:
+      DATABASE_URL: sqlite:////data/recruiterrag.db
+      MINIO_ENDPOINT: storage:9000
+      MINIO_ACCESS_KEY: recruiterrag
+      MINIO_SECRET_KEY: recruiterrag
+      HF_MODEL_ID: Qwen/Qwen3-8B
+      ADAPTER_OUTPUT_BUCKET: model-adapters
+    volumes:
+      - db_data:/data
+      - model_data:/models
+      - trainer_cache:/root/.cache/huggingface
+    ports:
+      - "8500:8500"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: [gpu]
+
+volumes:
+  ollama_data:
+  milvus_data:
+  minio_data:
+  db_data:
+  model_data:
+  trainer_cache:

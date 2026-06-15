@@ -1,0 +1,24 @@
+# Local development overrides: hot reload + source mounts.
+# `docker compose up` picks this file up automatically.
+services:
+
+  api:
+    volumes:
+      - ./backend/app:/app/app
+      - db_data:/data
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+  ui:
+    # Distinct image tag so the dev (build-stage) image never overwrites the
+    # production `recruiterrag-ui` image — otherwise a later non-dev `up` reuses a
+    # CMD-less image that exits immediately.
+    image: recruiterrag-ui-dev
+    build:
+      context: ./frontend
+      target: build
+    command: pnpm run dev
+    volumes:
+      - ./frontend/src:/app/src
+      - ./frontend/index.html:/app/index.html
+    environment:
+      VITE_API_URL: http://localhost:8000

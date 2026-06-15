@@ -1,0 +1,18 @@
+# GPU overlay — opt in with:
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up
+#
+# Requires an NVIDIA GPU plus:
+#   - Linux: nvidia-container-toolkit installed and configured
+#   - Windows: Docker Desktop with WSL2 backend + recent NVIDIA driver (GPU works out of the box)
+#
+# With the GPU, qwen3:8b runs on VRAM (the 3060 Ti's 8 GB) instead of system RAM —
+# fast inference and no host-RAM OOM.
+services:
+  ollama:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
