@@ -1,5 +1,7 @@
 # RecruiterRAG
 
+![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)
+
 A fully local, AI-powered recruiting pipeline for non-technical recruiters. Upload resumes and job
 descriptions — the AI extracts, scores, and ranks candidates, and you explore them through a chat
 interface with live charts. No cloud accounts, no API keys. Everything runs on your machine.
@@ -227,13 +229,12 @@ docker compose --profile finetuned up -d llamacpp
 | Scanned PDFs read poorly | OCR quality depends on scan resolution. Paste the text manually if extraction looks wrong. |
 | Training says "no GPU found" | The trainer needs CUDA or Apple Silicon. CPU training is not supported. |
 
-## Development
-
-See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md). Spec and plan live in [docs/spec.md](docs/spec.md)
-and [docs/PROJECT_PLAN.md](docs/PROJECT_PLAN.md).
-
 ## Privacy
 
 All inference, storage, and processing stays on your machine. After the first model download the
 app runs fully offline. MinIO credentials default to `recruiterrag`/`recruiterrag` — change them if
 you ever expose the services beyond localhost.
+
+## License
+
+[MIT](LICENSE)
