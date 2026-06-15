@@ -34,3 +34,7 @@ docs/spec.md
 .idea/
 .DS_Store
 Thumbs.db
+
+.claude
+.specify
+docs/
