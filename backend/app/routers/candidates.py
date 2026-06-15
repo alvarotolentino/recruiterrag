@@ -10,7 +10,15 @@ from sse_starlette.sse import EventSourceResponse
 
 from ..config import settings
 from ..db import get_session
-from ..models import Candidate, PipelineCandidate, Position, StageHistory, utcnow
+from ..models import (
+    Candidate,
+    PipelineCandidate,
+    PipelineNote,
+    Position,
+    StageHistory,
+    TrainingTag,
+    utcnow,
+)
 from ..services import milvus_client, storage
 from ..services.extraction import SUPPORTED_EXTENSIONS, extract_text
 from ..services.ingestion import ingest_files
@@ -338,12 +346,17 @@ def delete_candidate(candidate_id: str, session: Session = Depends(get_session))
     candidate = session.get(Candidate, candidate_id)
     if candidate is None:
         raise HTTPException(404, "Candidate not found")
-    pcs = session.exec(select(PipelineCandidate).where(PipelineCandidate.candidate_id == candidate_id)).all()
-    for pc in pcs:
-        for h in session.exec(select(StageHistory).where(StageHistory.pipeline_cand_id == pc.id)).all():
-            session.delete(h)
-        session.delete(pc)
-    session.delete(candidate)
+    with session.no_autoflush:
+        pcs = session.exec(select(PipelineCandidate).where(PipelineCandidate.candidate_id == candidate_id)).all()
+        for pc in pcs:
+            for h in session.exec(select(StageHistory).where(StageHistory.pipeline_cand_id == pc.id)).all():
+                session.delete(h)
+            for n in session.exec(select(PipelineNote).where(PipelineNote.pipeline_cand_id == pc.id)).all():
+                session.delete(n)
+            session.delete(pc)
+        for tag in session.exec(select(TrainingTag).where(TrainingTag.candidate_id == candidate_id)).all():
+            session.delete(tag)
+        session.delete(candidate)
     session.commit()
     try:
         milvus_client.delete_candidate(candidate_id)
