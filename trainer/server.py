@@ -4,6 +4,7 @@ import threading
 from dataclasses import asdict
 
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 import trainer_db
@@ -12,6 +13,12 @@ from hardware import detect_hardware
 
 logging.basicConfig(level=logging.INFO)
 app = FastAPI(title="RecruiterRAG Trainer")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # local single-user app; the UI calls the trainer directly
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 _active_lock = threading.Lock()
 _active_run: str | None = None
