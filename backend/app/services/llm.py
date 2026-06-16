@@ -104,8 +104,12 @@ class LlamaCppClient(LLMClient):
     async def chat(
         self, messages: list[dict], thinking: bool = False, fmt: Optional[JsonFormat] = None
     ) -> str:
+        # Qwen3 defaults to thinking mode; /no_think via system message disables it so
+        # the response goes to "content" (not reasoning_content) and JSON schema output works.
+        no_think_sys = {"role": "system", "content": "/no_think"}
+        controlled = [no_think_sys] + [m for m in messages if m.get("role") != "system"]
         payload: dict = {
-            "messages": messages,
+            "messages": controlled,
             "temperature": 0.2,
             "max_tokens": 4096,
         }
@@ -120,7 +124,9 @@ class LlamaCppClient(LLMClient):
             resp = await client.post(f"{self.base_url}/v1/chat/completions", json=payload)
             resp.raise_for_status()
             data = resp.json()
-        return data["choices"][0]["message"]["content"]
+        msg = data["choices"][0]["message"]
+        # If thinking still ran and exhausted the token budget, content is ""; fall back.
+        return msg.get("content") or msg.get("reasoning_content") or ""
 
 
 _client: Optional[LLMClient] = None

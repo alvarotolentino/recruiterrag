@@ -10,11 +10,21 @@ function ComparisonColumn({ title, side }: { title: string; side: ComparisonSide
     <div className="rounded-xl border border-slate-200 bg-white p-4">
       <h3 className="text-sm font-semibold">{title}</h3>
       {!side.ok ? (
-        <p className="mt-3 rounded-lg bg-yellow-50 p-3 text-sm text-yellow-700">
-          {side.backend === 'llamacpp'
-            ? 'Your custom AI is not reachable. Start it with: docker compose --profile finetuned up -d llamacpp'
-            : `This model could not score the candidate: ${side.error}`}
-        </p>
+        <div className="mt-3 rounded-lg bg-yellow-50 p-3 text-sm text-yellow-700 space-y-1">
+          {side.backend === 'llamacpp' ? (
+            <>
+              <p>Custom AI not reachable. Start with:</p>
+              <code className="block text-xs bg-yellow-100 px-2 py-1 rounded">
+                docker compose --profile finetuned up -d llamacpp
+              </code>
+              {side.error && (
+                <p className="text-xs text-red-600 mt-1">Error: {side.error}</p>
+              )}
+            </>
+          ) : (
+            <p>Standard AI scoring failed: {side.error}</p>
+          )}
+        </div>
       ) : (
         <>
           <p className="mt-1 text-2xl font-bold text-brand-700">{side.fit_score?.toFixed(1)}/10</p>
