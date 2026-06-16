@@ -166,7 +166,7 @@ class TrainingRun(SQLModel, table=True):
     id: str = Field(default_factory=new_uuid, primary_key=True)
     dataset_id: str = Field(foreign_key="training_datasets.id", index=True)
     method: str  # 'sft' | 'dpo' | 'grpo'
-    base_model: str = "Qwen/Qwen3-8B"
+    base_model: str = "Qwen/Qwen3-4B"
     lora_rank: int = 16
     epochs: int = 3
     learning_rate: float = 2e-4

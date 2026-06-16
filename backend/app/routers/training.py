@@ -22,7 +22,7 @@ from ..services.llm import make_client, set_backend
 
 router = APIRouter(prefix="/training", tags=["training"])
 
-MIN_DPO_PAIRS = 20
+MIN_DPO_PAIRS = 10  # TEMP: lowered from 20 for end-to-end testing — restore to 20
 MIN_SFT_EXAMPLES = 30
 MIN_GRPO_PROMPTS = 10
 
@@ -64,7 +64,7 @@ class GeneratePairs(BaseModel):
 class RunCreate(BaseModel):
     dataset_id: str
     method: str  # sft | dpo | grpo
-    base_model: str = "Qwen/Qwen3-8B"
+    base_model: str = "Qwen/Qwen3-4B"  # matches the qwen3:4b chat model; fits an 8 GB GPU
     lora_rank: int = 16
     epochs: int = 3
     learning_rate: float = 2e-4

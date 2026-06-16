@@ -161,7 +161,7 @@ services:
       MINIO_ENDPOINT: storage:9000
       MINIO_ACCESS_KEY: recruiterrag
       MINIO_SECRET_KEY: recruiterrag
-      HF_MODEL_ID: Qwen/Qwen3-8B
+      HF_MODEL_ID: Qwen/Qwen3-4B
       ADAPTER_OUTPUT_BUCKET: model-adapters
     volumes:
       - db_data:/data
