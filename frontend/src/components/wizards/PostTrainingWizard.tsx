@@ -380,7 +380,14 @@ export function PostTrainingWizard() {
               <ResponsiveContainer>
                 <LineChart data={run.metrics.loss_curve}>
                   <XAxis dataKey="step" tick={{ fontSize: 10 }} />
-                  <YAxis tick={{ fontSize: 10 }} />
+                  <YAxis
+                    scale="log"
+                    domain={['auto', 'auto']}
+                    allowDataOverflow
+                    tick={{ fontSize: 10 }}
+                    width={48}
+                    tickFormatter={(v: number) => (v >= 0.01 ? v.toFixed(2) : v.toExponential(0))}
+                  />
                   <Tooltip />
                   <Line type="monotone" dataKey="loss" stroke="#2563eb" strokeWidth={2} dot={false} />
                 </LineChart>
