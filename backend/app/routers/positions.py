@@ -69,6 +69,25 @@ class NoteCreate(BaseModel):
     content: str
 
 
+def _require_open(position: Position) -> None:
+    """Reject writes to a closed pipeline. Closed positions are read-only (UI mirrors this)."""
+    if position.status.startswith("closed"):
+        raise HTTPException(409, "This pipeline is closed and read-only.")
+
+
+def _terminal_signal(stage: str | None) -> str | None:
+    """Classify a stage name as a hiring-commitment signal other pipelines must know about.
+    Keyword match so it works for custom stage names, not only the defaults."""
+    if not stage:
+        return None
+    s = stage.lower()
+    if "hire" in s:  # "Hired", "Hire", ...
+        return "hired"
+    if "offer" in s:
+        return "offer"
+    return None
+
+
 def position_to_dict(p: Position, candidate_count: int | None = None) -> dict:
     d = {
         "id": p.id,
@@ -179,6 +198,7 @@ def update_position(position_id: str, body: PositionUpdate, session: Session = D
     position = session.get(Position, position_id)
     if position is None:
         raise HTTPException(404, "Position not found")
+    _require_open(position)
     if body.title is not None:
         position.title = body.title
     if body.description is not None:
@@ -230,6 +250,30 @@ def pipeline_candidates(position_id: str, include_excluded: bool = False,
         .where(PipelineCandidate.position_id == position_id)
         .where(PipelineCandidate.candidate_id == Candidate.id)
     ).all()
+
+    # Cross-pipeline awareness: surface candidates who received an offer or were hired in
+    # ANOTHER pipeline, so the recruiter can decide whether to keep pursuing them here.
+    cand_ids = [c.id for _, c in rows]
+    alerts_by_cand: dict[str, list[dict]] = {}
+    if cand_ids:
+        other = session.exec(
+            select(PipelineCandidate, Position)
+            .where(PipelineCandidate.candidate_id.in_(cand_ids))
+            .where(PipelineCandidate.position_id != position_id)
+            .where(PipelineCandidate.position_id == Position.id)
+        ).all()
+        for opc, opos in other:
+            signal = _terminal_signal(opc.current_stage)
+            if signal is None:
+                continue
+            alerts_by_cand.setdefault(opc.candidate_id, []).append({
+                "position_id": opos.id,
+                "position_title": opos.title,
+                "position_status": opos.status,
+                "stage": opc.current_stage,
+                "signal": signal,
+            })
+
     out = []
     excluded_count = 0
     for pc, c in rows:
@@ -263,6 +307,7 @@ def pipeline_candidates(position_id: str, include_excluded: bool = False,
                 for n in notes
             ],
             "added_at": pc.added_at.isoformat() if pc.added_at else None,
+            "cross_pipeline_alerts": alerts_by_cand.get(c.id, []),
         })
     out.sort(key=lambda x: (x["status"] == "excluded", -(x["fit_score"] or 0)))
     return {"candidates": out, "excluded_count": excluded_count}
@@ -270,8 +315,10 @@ def pipeline_candidates(position_id: str, include_excluded: bool = False,
 
 @router.post("/{position_id}/candidates")
 async def add_candidate(position_id: str, body: AddCandidate, session: Session = Depends(get_session)):
-    if session.get(Position, position_id) is None:
+    position = session.get(Position, position_id)
+    if position is None:
         raise HTTPException(404, "Position not found")
+    _require_open(position)
     if session.get(Candidate, body.candidate_id) is None:
         raise HTTPException(404, "Candidate not found")
     try:
@@ -291,6 +338,7 @@ def move_stage(position_id: str, candidate_id: str, body: StageMove, session: Se
     position = session.get(Position, position_id)
     if position is None:
         raise HTTPException(404, "Position not found")
+    _require_open(position)
     stages = json.loads(position.stages or "[]")
     if stages and body.stage not in stages:
         raise HTTPException(400, f"Unknown stage: {body.stage}")
@@ -327,6 +375,10 @@ def _get_pipeline_candidate(session: Session, position_id: str, candidate_id: st
 def add_note(position_id: str, candidate_id: str, body: NoteCreate, session: Session = Depends(get_session)):
     if not body.content.strip():
         raise HTTPException(400, "Note content is required")
+    position = session.get(Position, position_id)
+    if position is None:
+        raise HTTPException(404, "Position not found")
+    _require_open(position)
     pc = _get_pipeline_candidate(session, position_id, candidate_id)
     note = PipelineNote(pipeline_cand_id=pc.id, stage=body.stage, content=body.content.strip())
     session.add(note)
@@ -342,6 +394,10 @@ def add_note(position_id: str, candidate_id: str, body: NoteCreate, session: Ses
 
 @router.delete("/{position_id}/candidates/{candidate_id}/notes/{note_id}")
 def delete_note(position_id: str, candidate_id: str, note_id: str, session: Session = Depends(get_session)):
+    position = session.get(Position, position_id)
+    if position is None:
+        raise HTTPException(404, "Position not found")
+    _require_open(position)
     pc = _get_pipeline_candidate(session, position_id, candidate_id)
     note = session.get(PipelineNote, note_id)
     if note is None or note.pipeline_cand_id != pc.id:
@@ -352,8 +408,12 @@ def delete_note(position_id: str, candidate_id: str, note_id: str, session: Sess
 
 
 @router.post("/{position_id}/candidates/{candidate_id}/rescore")
-async def rescore_candidate(position_id: str, candidate_id: str):
+async def rescore_candidate(position_id: str, candidate_id: str, session: Session = Depends(get_session)):
     """Re-run scoring for one candidate, incorporating their interview notes."""
+    position = session.get(Position, position_id)
+    if position is None:
+        raise HTTPException(404, "Position not found")
+    _require_open(position)
     try:
         pc = await rescore_with_notes(position_id, candidate_id)
     except ValueError as exc:
@@ -368,8 +428,12 @@ async def rescore_candidate(position_id: str, candidate_id: str):
 
 
 @router.post("/{position_id}/candidates/{candidate_id}/include")
-async def include_candidate(position_id: str, candidate_id: str):
+async def include_candidate(position_id: str, candidate_id: str, session: Session = Depends(get_session)):
     """Override an exclusion: re-include a filtered-out candidate and score them."""
+    position = session.get(Position, position_id)
+    if position is None:
+        raise HTTPException(404, "Position not found")
+    _require_open(position)
     try:
         pc = await score_single(position_id, candidate_id)
     except ValueError as exc:
@@ -391,6 +455,7 @@ async def find_new_candidates(position_id: str, session: Session = Depends(get_s
     position = session.get(Position, position_id)
     if position is None:
         raise HTTPException(404, "Position not found")
+    _require_open(position)
     job = create_job("scoring")
     _scoring_jobs[position_id] = job.id
     asyncio.create_task(run_matching(job, position_id, only_new=True))
@@ -404,6 +469,7 @@ async def rematch_all(position_id: str, session: Session = Depends(get_session))
     position = session.get(Position, position_id)
     if position is None:
         raise HTTPException(404, "Position not found")
+    _require_open(position)
     job = create_job("scoring")
     _scoring_jobs[position_id] = job.id
     asyncio.create_task(run_matching(job, position_id, only_new=False))
@@ -413,8 +479,10 @@ async def rematch_all(position_id: str, session: Session = Depends(get_session))
 @router.post("/{position_id}/rescore")
 async def rescore_position(position_id: str, session: Session = Depends(get_session)):
     """Re-score every candidate in the pipeline (notes + current dimensions) as a background job."""
-    if session.get(Position, position_id) is None:
+    position = session.get(Position, position_id)
+    if position is None:
         raise HTTPException(404, "Position not found")
+    _require_open(position)
     job = create_job("scoring")
     _scoring_jobs[position_id] = job.id
     asyncio.create_task(rescore_pipeline(job, position_id))
