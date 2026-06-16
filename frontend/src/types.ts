@@ -141,6 +141,15 @@ export interface PipelineCandidateRow {
   recruiter_notes: string | null;
   notes: PipelineNote[];
   added_at: string | null;
+  cross_pipeline_alerts?: CrossPipelineAlert[];
+}
+
+export interface CrossPipelineAlert {
+  position_id: string;
+  position_title: string;
+  position_status: PositionStatus;
+  stage: string | null;
+  signal: 'offer' | 'hired';
 }
 
 export interface PipelineNote {

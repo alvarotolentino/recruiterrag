@@ -16,16 +16,32 @@ export interface StageBoardProps {
   stages: string[];
   candidates: PipelineCandidateRow[];
   onMove: (candidateId: string, stage: string) => void;
+  onCardClick: (candidateId: string) => void;
+  readOnly?: boolean;
 }
 
 function CandidateCard({ row, overlay = false }: { row: PipelineCandidateRow; overlay?: boolean }) {
+  const hasStageNote = (row.notes ?? []).some((n) => n.stage === row.current_stage);
+  const alerts = row.cross_pipeline_alerts ?? [];
+  const hired = alerts.some((a) => a.signal === 'hired');
+  const alertLabel = alerts.length
+    ? `${hired ? 'Hired' : 'Has an offer'} in another pipeline: ${alerts
+        .map((a) => a.position_title)
+        .join(', ')}`
+    : '';
   return (
     <div
-      className={`rounded-lg border border-slate-200 bg-white p-2 text-xs shadow-sm ${
-        overlay ? 'rotate-2 shadow-lg' : ''
-      }`}
+      className={`rounded-lg border bg-white p-2 text-xs shadow-sm ${
+        alerts.length ? 'border-amber-300' : 'border-slate-200'
+      } ${overlay ? 'rotate-2 shadow-lg' : ''}`}
     >
-      <p className="font-medium">{row.full_name}</p>
+      <div className="flex items-center justify-between gap-1">
+        <p className="font-medium">{row.full_name}</p>
+        <div className="flex shrink-0 items-center gap-1">
+          {alerts.length > 0 && <span title={alertLabel}>{hired ? '🛑' : '⚠️'}</span>}
+          {hasStageNote && <span title="Has notes for this stage" className="h-2 w-2 rounded-full bg-brand-500" />}
+        </div>
+      </div>
       <div className="mt-1 flex items-center justify-between text-slate-500">
         <span className="truncate">{row.current_role ?? ''}</span>
         {row.fit_score != null && (
@@ -36,28 +52,49 @@ function CandidateCard({ row, overlay = false }: { row: PipelineCandidateRow; ov
   );
 }
 
-function DraggableCard({ row }: { row: PipelineCandidateRow }) {
+function DraggableCard({
+  row,
+  onCardClick,
+  readOnly,
+}: {
+  row: PipelineCandidateRow;
+  onCardClick: () => void;
+  readOnly?: boolean;
+}) {
   const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
     id: row.candidate_id,
+    disabled: readOnly,
   });
   return (
     <div
       ref={setNodeRef}
       {...attributes}
-      {...listeners}
-      className={`cursor-grab touch-none active:cursor-grabbing ${isDragging ? 'opacity-30' : ''}`}
+      className={`cursor-pointer touch-none ${isDragging ? 'opacity-30' : ''}`}
+      onClick={() => !isDragging && onCardClick()}
     >
-      <CandidateCard row={row} />
+      <div {...(readOnly ? {} : listeners)} className={readOnly ? '' : 'cursor-grab active:cursor-grabbing'}>
+        <CandidateCard row={row} />
+      </div>
     </div>
   );
 }
 
-function StageColumn({ stage, rows }: { stage: string; rows: PipelineCandidateRow[] }) {
+function StageColumn({
+  stage,
+  rows,
+  onCardClick,
+  readOnly,
+}: {
+  stage: string;
+  rows: PipelineCandidateRow[];
+  onCardClick: (candidateId: string) => void;
+  readOnly?: boolean;
+}) {
   const { setNodeRef, isOver } = useDroppable({ id: stage });
   return (
     <div
       ref={setNodeRef}
-      className={`flex w-44 shrink-0 flex-col rounded-xl border p-2 transition ${
+      className={`flex w-full min-w-[13rem] flex-1 flex-col rounded-xl border p-2 transition sm:min-w-[15rem] ${
         isOver ? 'border-brand-400 bg-brand-50' : 'border-slate-200 bg-slate-50'
       }`}
     >
@@ -67,7 +104,12 @@ function StageColumn({ stage, rows }: { stage: string; rows: PipelineCandidateRo
       </p>
       <div className="min-h-16 flex-1 space-y-1.5">
         {rows.map((row) => (
-          <DraggableCard key={row.candidate_id} row={row} />
+          <DraggableCard
+            key={row.candidate_id}
+            row={row}
+            onCardClick={() => onCardClick(row.candidate_id)}
+            readOnly={readOnly}
+          />
         ))}
       </div>
     </div>
@@ -75,7 +117,7 @@ function StageColumn({ stage, rows }: { stage: string; rows: PipelineCandidateRo
 }
 
 /** Kanban view of the pipeline — drag candidates between stage columns (@dnd-kit). */
-export function StageBoard({ stages, candidates, onMove }: StageBoardProps) {
+export function StageBoard({ stages, candidates, onMove, onCardClick, readOnly }: StageBoardProps) {
   const [activeId, setActiveId] = useState<string | null>(null);
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 4 } }));
 
@@ -97,12 +139,14 @@ export function StageBoard({ stages, candidates, onMove }: StageBoardProps) {
 
   return (
     <DndContext sensors={sensors} onDragStart={handleDragStart} onDragEnd={handleDragEnd}>
-      <div className="flex gap-2 overflow-x-auto pb-2">
+      <div className="flex gap-3 overflow-x-auto pb-2">
         {stages.map((stage) => (
           <StageColumn
             key={stage}
             stage={stage}
             rows={candidates.filter((c) => c.current_stage === stage)}
+            onCardClick={onCardClick}
+            readOnly={readOnly}
           />
         ))}
       </div>

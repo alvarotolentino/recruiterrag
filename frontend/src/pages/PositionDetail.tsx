@@ -14,9 +14,8 @@ import {
   updatePositionStatus,
 } from '../api/client';
 import { FloatingChat } from '../components/chat/FloatingChat';
-import { ScoreSpider } from '../components/candidates/ScoreSpider';
 import { StageBoard } from '../components/candidates/StageBoard';
-import { CandidateNotes } from '../components/positions/CandidateNotes';
+import { CandidatePopup } from '../components/positions/CandidatePopup';
 import { DimensionEditor } from '../components/positions/DimensionEditor';
 import { EmptyState } from '../components/shared/EmptyState';
 import { InfoTooltip } from '../components/shared/InfoTooltip';
@@ -44,29 +43,18 @@ function ScoreChip({ score }: { score: number | null }) {
 
 function CandidateRow({
   row,
-  stages,
   positionId,
   targets,
-  expanded,
-  onToggle,
+  readOnly,
+  onOpenPopup,
 }: {
   row: PipelineCandidateRow;
-  stages: string[];
   positionId: string;
   targets: Record<string, number>;
-  expanded: boolean;
-  onToggle: () => void;
+  readOnly?: boolean;
+  onOpenPopup: () => void;
 }) {
   const queryClient = useQueryClient();
-  const stageMutation = useMutation({
-    mutationFn: (stage: string) => moveCandidateStage(positionId, row.candidate_id, stage),
-    onSuccess: (_, stage) => {
-      toast.success(`${row.full_name} moved to ${stage}`);
-      queryClient.invalidateQueries({ queryKey: ['pipeline', positionId] });
-    },
-    onError: (err: Error) => toast.error(err.message),
-  });
-
   const includeMutation = useMutation({
     mutationFn: () => includeExcludedCandidate(positionId, row.candidate_id),
     onSuccess: () => {
@@ -95,20 +83,22 @@ function CandidateRow({
           </span>
         </div>
         <p className="mt-1.5 text-xs text-slate-500">{row.exclusion_reason ?? 'Did not match this role.'}</p>
-        <button
-          onClick={() => includeMutation.mutate()}
-          disabled={includeMutation.isPending}
-          className="mt-2 rounded-md border border-brand-200 bg-white px-2.5 py-1 text-xs font-medium text-brand-700 hover:bg-brand-50 disabled:opacity-50"
-        >
-          {includeMutation.isPending ? 'Including…' : 'Include anyway'}
-        </button>
+        {!readOnly && (
+          <button
+            onClick={() => includeMutation.mutate()}
+            disabled={includeMutation.isPending}
+            className="mt-2 rounded-md border border-brand-200 bg-white px-2.5 py-1 text-xs font-medium text-brand-700 hover:bg-brand-50 disabled:opacity-50"
+          >
+            {includeMutation.isPending ? 'Including…' : 'Include anyway'}
+          </button>
+        )}
       </li>
     );
   }
 
   return (
     <li className="rounded-lg border border-slate-200 bg-white">
-      <button onClick={onToggle} className="flex w-full items-center justify-between px-3 py-2.5 text-left">
+      <button onClick={onOpenPopup} className="flex w-full items-center justify-between px-3 py-2.5 text-left">
         <div>
           <p className="text-sm font-medium">{row.full_name}</p>
           <p className="text-xs text-slate-500">
@@ -132,54 +122,6 @@ function CandidateRow({
           <span className="rounded bg-slate-100 px-2 py-0.5 text-xs">{row.current_stage}</span>
         </div>
       </button>
-      {expanded && (
-        <div className="border-t border-slate-100 p-3">
-          <ScoreSpider scores={row.dimension_scores} name={row.full_name} />
-          <ul className="mt-2 space-y-1">
-            {row.dimension_scores.map((d) => {
-              const target = targets[d.dimension];
-              const meets = target == null || d.score >= target;
-              return (
-                <li key={d.dimension} className="text-xs text-slate-600">
-                  <span aria-hidden>{target == null ? '' : meets ? '✅ ' : '⚠️ '}</span>
-                  <span className="font-semibold">
-                    {d.dimension}: {d.score}/10
-                  </span>
-                  {target != null && (
-                    <span className={meets ? 'text-green-600' : 'text-amber-600'}>
-                      {' '}
-                      (target ≥{target})
-                    </span>
-                  )}
-                  {d.justification ? ` — ${d.justification}` : ''}
-                </li>
-              );
-            })}
-          </ul>
-          <label className="mt-3 block text-xs font-medium text-slate-600">
-            Move to stage
-            <select
-              value={row.current_stage ?? ''}
-              onChange={(e) => stageMutation.mutate(e.target.value)}
-              disabled={stageMutation.isPending}
-              className="ml-2 rounded border border-slate-300 px-2 py-1 text-xs"
-            >
-              {stages.map((s) => (
-                <option key={s} value={s}>
-                  {s}
-                </option>
-              ))}
-            </select>
-          </label>
-          <CandidateNotes
-            positionId={positionId}
-            candidateId={row.candidate_id}
-            stages={stages}
-            currentStage={row.current_stage}
-            notes={row.notes ?? []}
-          />
-        </div>
-      )}
     </li>
   );
 }
@@ -187,9 +129,9 @@ function CandidateRow({
 export default function PositionDetail() {
   const { id = '' } = useParams();
   const queryClient = useQueryClient();
-  const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
+  const [popupCandidateId, setPopupCandidateId] = useState<string | null>(null);
   const [sortBy, setSortBy] = useState<'fit' | 'name' | 'years'>('fit');
-  const [view, setView] = useState<'list' | 'board'>('list');
+  const [view, setView] = useState<'list' | 'board'>('board');
   const [closeDialog, setCloseDialog] = useState(false);
   const [scoringProgress, setScoringProgress] = useState<string | null>(null);
   const [onlyMeetingTargets, setOnlyMeetingTargets] = useState(false);
@@ -283,8 +225,12 @@ export default function PositionDetail() {
     onError: (err: Error) => toast.error(err.message),
   });
 
+  const openPopup = (candidateId: string) => setPopupCandidateId(candidateId);
+  const closePopup = () => setPopupCandidateId(null);
+
   if (isLoading || !position) return <LoadingSpinner label="Loading position…" />;
 
+  const readOnly = position.status.startsWith('closed');
   const jd = position.extracted_schema;
   const dimensions = jd.scoring_dimensions ?? [];
   const targets: Record<string, number> = Object.fromEntries(
@@ -347,6 +293,12 @@ export default function PositionDetail() {
       {scoringProgress && (
         <div className="mb-3 rounded-lg bg-brand-50 px-4 py-2 text-sm text-brand-700">
           ⏳ {scoringProgress}
+        </div>
+      )}
+
+      {readOnly && (
+        <div className="mb-3 rounded-lg bg-slate-100 px-4 py-2 text-sm text-slate-600">
+          🔒 This pipeline is closed and read-only. Candidates, stages, scores, and notes can be viewed but not changed.
         </div>
       )}
 
@@ -430,12 +382,14 @@ export default function PositionDetail() {
               <InfoTooltip text="The qualities the AI rates each candidate on (1–10), pulled from the job description. Each shows a target — the minimum score a candidate should reach. Used to flag who clears the bar." />
             </h2>
             {editDims === null ? (
-              <button
-                onClick={() => setEditDims(dimensions.map((d) => ({ ...d })))}
-                className="text-xs font-medium text-brand-600 hover:underline"
-              >
-                Edit
-              </button>
+              !readOnly && (
+                <button
+                  onClick={() => setEditDims(dimensions.map((d) => ({ ...d })))}
+                  className="text-xs font-medium text-brand-600 hover:underline"
+                >
+                  Edit
+                </button>
+              )
             ) : (
               <div className="flex gap-2">
                 <button
@@ -491,7 +445,7 @@ export default function PositionDetail() {
                 🔍 Find new candidates
               </button>
             )}
-            {allRows.length > 0 && (
+            {allRows.length > 0 && !readOnly && (
               <button
                 onClick={() => rescorePipelineMutation.mutate()}
                 disabled={rescorePipelineMutation.isPending || Boolean(scoringProgress)}
@@ -573,6 +527,8 @@ export default function PositionDetail() {
             stages={position.stages}
             candidates={onlyMeetingTargets ? visibleRows.filter((r) => r.status !== 'excluded') : eligibleRows}
             onMove={(candidateId, stage) => boardMoveMutation.mutate({ candidateId, stage })}
+            onCardClick={(candidateId) => openPopup(candidateId)}
+            readOnly={readOnly}
           />
         ) : visibleRows.length === 0 ? (
           <p className="rounded-lg border border-dashed border-slate-300 p-6 text-center text-sm text-slate-400">
@@ -584,24 +540,29 @@ export default function PositionDetail() {
               <CandidateRow
                 key={row.pipeline_candidate_id}
                 row={row}
-                stages={position.stages}
                 positionId={id}
                 targets={targets}
-                expanded={expandedIds.has(row.pipeline_candidate_id)}
-                onToggle={() =>
-                  setExpandedIds((prev) => {
-                    const next = new Set(prev);
-                    next.has(row.pipeline_candidate_id)
-                      ? next.delete(row.pipeline_candidate_id)
-                      : next.add(row.pipeline_candidate_id);
-                    return next;
-                  })
-                }
+                readOnly={readOnly}
+                onOpenPopup={() => openPopup(row.candidate_id)}
               />
             ))}
           </ul>
         )}
       </section>
+
+      {popupCandidateId && (() => {
+        const row = eligibleRows.find((c) => c.candidate_id === popupCandidateId);
+        return row ? (
+          <CandidatePopup
+            row={row}
+            stages={position.stages}
+            positionId={id}
+            targets={targets}
+            readOnly={readOnly}
+            onClose={closePopup}
+          />
+        ) : null;
+      })()}
 
       {/* Floating chat assistant — toggled by the bubble, history persists server-side */}
       <FloatingChat positionId={id} />

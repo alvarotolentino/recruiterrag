@@ -10,13 +10,15 @@ export interface CandidateNotesProps {
   stages: string[];
   currentStage: string | null;
   notes: PipelineNote[];
+  readOnly?: boolean;
 }
 
 /** Stage-tagged interview/screening notes with a "re-score with notes" action. */
-export function CandidateNotes({ positionId, candidateId, stages, currentStage, notes }: CandidateNotesProps) {
+export function CandidateNotes({ positionId, candidateId, stages, currentStage, notes, readOnly }: CandidateNotesProps) {
   const queryClient = useQueryClient();
   const [stage, setStage] = useState(currentStage ?? stages[0] ?? '');
   const [content, setContent] = useState('');
+  const [open, setOpen] = useState(true);
 
   const invalidate = () => queryClient.invalidateQueries({ queryKey: ['pipeline', positionId] });
 
@@ -51,17 +53,31 @@ export function CandidateNotes({ positionId, candidateId, stages, currentStage, 
   return (
     <div className="mt-3 border-t border-slate-100 pt-3">
       <div className="mb-2 flex items-center justify-between">
-        <h4 className="text-xs font-semibold uppercase tracking-wide text-slate-500">Interview notes</h4>
         <button
-          onClick={() => rescoreMutation.mutate()}
-          disabled={rescoreMutation.isPending}
-          title="Re-run AI scoring using the resume plus these notes"
-          className="rounded-md bg-brand-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-brand-700 disabled:opacity-50"
+          onClick={() => setOpen((v) => !v)}
+          aria-expanded={open}
+          className="flex items-center gap-1 text-xs font-semibold uppercase tracking-wide text-slate-500 hover:text-slate-700"
         >
-          {rescoreMutation.isPending ? 'Re-scoring…' : '✨ Re-score with notes'}
+          <span aria-hidden className={`transition-transform ${open ? 'rotate-90' : ''}`}>▸</span>
+          Interview notes
+          {notes.length > 0 && (
+            <span className="rounded-full bg-slate-200 px-1.5 text-[10px] font-bold text-slate-600">{notes.length}</span>
+          )}
         </button>
+        {!readOnly && (
+          <button
+            onClick={() => rescoreMutation.mutate()}
+            disabled={rescoreMutation.isPending}
+            title="Re-run AI scoring using the resume plus these notes"
+            className="rounded-md bg-brand-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-brand-700 disabled:opacity-50"
+          >
+            {rescoreMutation.isPending ? 'Re-scoring…' : '✨ Re-score with notes'}
+          </button>
+        )}
       </div>
 
+      {open && (
+        <>
       {notes.length === 0 && (
         <p className="text-xs text-slate-400">No notes yet. Add screening or interview observations below.</p>
       )}
@@ -72,48 +88,54 @@ export function CandidateNotes({ positionId, candidateId, stages, currentStage, 
             {stageNotes.map((n) => (
               <li key={n.id} className="group flex items-start justify-between gap-2 rounded bg-slate-50 px-2 py-1 text-xs">
                 <span className="text-slate-700">{n.content}</span>
-                <button
-                  onClick={() => deleteMutation.mutate(n.id)}
-                  aria-label="Delete note"
-                  className="text-slate-300 hover:text-red-500 group-hover:text-slate-400"
-                >
-                  ✕
-                </button>
+                {!readOnly && (
+                  <button
+                    onClick={() => deleteMutation.mutate(n.id)}
+                    aria-label="Delete note"
+                    className="text-slate-300 hover:text-red-500 group-hover:text-slate-400"
+                  >
+                    ✕
+                  </button>
+                )}
               </li>
             ))}
           </ul>
         </div>
       ))}
 
-      <div className="mt-2 flex flex-col gap-1.5">
-        <select
-          value={stage}
-          onChange={(e) => setStage(e.target.value)}
-          aria-label="Note stage"
-          className="w-full rounded border border-slate-300 px-2 py-1 text-xs"
-        >
-          {stages.map((s) => (
-            <option key={s} value={s}>
-              {s}
-            </option>
-          ))}
-        </select>
-        <textarea
-          value={content}
-          onChange={(e) => setContent(e.target.value)}
-          rows={2}
-          placeholder="Add a note for this stage… e.g. 'Strong on system design, hesitant on Raft internals.'"
-          aria-label="New note"
-          className="w-full rounded border border-slate-300 px-2 py-1 text-xs focus:border-brand-500 focus:outline-none"
-        />
-        <button
-          onClick={() => addMutation.mutate()}
-          disabled={!content.trim() || addMutation.isPending}
-          className="self-end rounded-md border border-slate-300 px-3 py-1 text-xs hover:bg-slate-50 disabled:opacity-50"
-        >
-          Add note
-        </button>
-      </div>
+      {!readOnly && (
+        <div className="mt-2 flex flex-col gap-1.5">
+          <select
+            value={stage}
+            onChange={(e) => setStage(e.target.value)}
+            aria-label="Note stage"
+            className="w-full rounded border border-slate-300 px-2 py-1 text-xs"
+          >
+            {stages.map((s) => (
+              <option key={s} value={s}>
+                {s}
+              </option>
+            ))}
+          </select>
+          <textarea
+            value={content}
+            onChange={(e) => setContent(e.target.value)}
+            rows={2}
+            placeholder="Add a note for this stage… e.g. 'Strong on system design, hesitant on Raft internals.'"
+            aria-label="New note"
+            className="w-full rounded border border-slate-300 px-2 py-1 text-xs focus:border-brand-500 focus:outline-none"
+          />
+          <button
+            onClick={() => addMutation.mutate()}
+            disabled={!content.trim() || addMutation.isPending}
+            className="self-end rounded-md border border-slate-300 px-3 py-1 text-xs hover:bg-slate-50 disabled:opacity-50"
+          >
+            Add note
+          </button>
+        </div>
+      )}
+        </>
+      )}
     </div>
   );
 }
