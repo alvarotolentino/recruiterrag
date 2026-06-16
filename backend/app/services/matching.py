@@ -32,7 +32,28 @@ def position_context(schema: dict) -> dict:
             c for c in (schema.get("exclusion_criteria") or [])
             if isinstance(c, dict) and c.get("enabled", True)
         ],
+        # JD-level hard constraints, enforced in apply_hard_gates (case-insensitive, audited)
+        # rather than as a silent Milvus pre-filter.
+        "remote_pref": schema.get("remote_preference"),
+        "min_years": schema.get("min_years_experience"),
+        "seniority_floor": schema.get("seniority_level"),
     }
+
+
+def _norm(value) -> str | None:
+    """Lower-case + trim strings for case-insensitive matching; pass through non-strings."""
+    return value.strip().lower() if isinstance(value, str) else value
+
+
+def _is_hired_stage(stage: str | None) -> bool:
+    return bool(stage) and "hire" in stage.lower()
+
+
+def get_globally_hired_ids() -> set[str]:
+    """Return IDs of candidates currently in a hired stage in any pipeline."""
+    with Session(engine) as session:
+        rows = session.exec(select(PipelineCandidate)).all()
+    return {pc.candidate_id for pc in rows if _is_hired_stage(pc.current_stage)}
 
 
 def _enabled_rule(criteria: list[dict], rule_type: str) -> dict | None:
@@ -53,10 +74,25 @@ def apply_hard_gates(candidate_ids: list[str], ctx: dict) -> tuple[list[str], li
     disc_rule = _enabled_rule(criteria, "discipline")
     years_rule = _enabled_rule(criteria, "min_years")
     sen_rule = _enabled_rule(criteria, "seniority_floor")
-    allowed = set(disc_rule.get("allowed") or []) if disc_rule else None
+
+    # Allowed disciplines (case-insensitive).
+    allowed = {_norm(d) for d in (disc_rule.get("allowed") or [])} if disc_rule else None
+
+    # Minimum years: stricter of the exclusion rule and the JD-level field.
     min_years = years_rule.get("min") if years_rule else None
-    floor = sen_rule.get("floor") if sen_rule else None
+    schema_min = ctx.get("min_years")
+    if isinstance(schema_min, (int, float)):
+        min_years = schema_min if min_years is None else max(min_years, schema_min)
+
+    # Seniority floor: exclusion rule wins, else JD-level seniority_level (case-insensitive).
+    floor_raw = (sen_rule.get("floor") if sen_rule else None) or ctx.get("seniority_floor")
+    floor = _norm(floor_raw)
     floor_idx = SENIORITY_ORDER.index(floor) if floor in SENIORITY_ORDER else None
+
+    # Remote: for a specific (non-flexible) role, accept that pref + flexible + hybrid; an
+    # unknown/blank pref fails open. Hybrid is treated as remote-capable; on-site is not.
+    remote_req = _norm(ctx.get("remote_pref"))
+    remote_ok = {remote_req, "flexible", "hybrid"} if remote_req and remote_req != "flexible" else None
 
     survivors: list[str] = []
     excluded: list[tuple[str, str]] = []
@@ -65,14 +101,16 @@ def apply_hard_gates(candidate_ids: list[str], ctx: dict) -> tuple[list[str], li
             cand = session.get(Candidate, cid)
             if cand is None:
                 continue
+            disc, sen, rem = _norm(cand.discipline), _norm(cand.seniority), _norm(cand.remote_pref)
             reason: str | None = None
-            if allowed and cand.discipline and cand.discipline not in allowed:
+            if allowed and disc and disc not in allowed:
                 reason = f"Discipline '{cand.discipline}' is not accepted for this role (needs {', '.join(sorted(allowed))})."
             elif isinstance(min_years, (int, float)) and cand.years_exp is not None and cand.years_exp < min_years:
                 reason = f"Has {cand.years_exp:g} years experience, below the {min_years:g}-year minimum."
-            elif floor_idx is not None and cand.seniority in SENIORITY_ORDER \
-                    and SENIORITY_ORDER.index(cand.seniority) < floor_idx:
-                reason = f"Seniority '{cand.seniority}' is below the required '{floor}'."
+            elif floor_idx is not None and sen in SENIORITY_ORDER and SENIORITY_ORDER.index(sen) < floor_idx:
+                reason = f"Seniority '{cand.seniority}' is below the required '{floor_raw}'."
+            elif remote_ok is not None and rem and rem not in remote_ok:
+                reason = f"Location preference '{cand.remote_pref}' doesn't fit this {remote_req} role."
             if reason:
                 excluded.append((cid, reason))
             else:
@@ -187,11 +225,10 @@ async def run_matching(job: Job, position_id: str, only_new: bool = False) -> No
             ])
         ) or (position.description or position.title)
         embedding = await embed_text(jd_text)
-        scalar_filter = build_scalar_filter(schema)
-        hits = milvus_client.search(embedding, top_k=settings.ANN_TOP_K, scalar_filter=scalar_filter)
-        if not hits and scalar_filter:
-            # Hard filters may be too strict for a small pool — retry unfiltered
-            hits = milvus_client.search(embedding, top_k=settings.ANN_TOP_K)
+        # Pure semantic ANN — hard constraints (discipline / years / seniority / remote) are
+        # enforced afterwards in apply_hard_gates so every drop is case-insensitive and
+        # produces an auditable "filtered out" row, instead of silently vanishing here.
+        hits = milvus_client.search(embedding, top_k=settings.ANN_TOP_K)
 
         candidate_ids = [h["id"] for h in hits]
         if only_new:
@@ -202,6 +239,16 @@ async def run_matching(job: Job, position_id: str, only_new: bool = False) -> No
                     ).all()
                 }
             candidate_ids = [cid for cid in candidate_ids if cid not in existing_ids]
+
+        # Drop candidates already hired in any pipeline — they're off the market.
+        hired_ids = get_globally_hired_ids()
+        for cid in [c for c in candidate_ids if c in hired_ids]:
+            store_exclusion(position_id, cid, first_stage,
+                            "Candidate has been hired in another pipeline.",
+                            note="Excluded: already hired")
+            job.publish({"type": "excluded", "candidate_id": cid,
+                         "reason": "Candidate has been hired in another pipeline."})
+        candidate_ids = [c for c in candidate_ids if c not in hired_ids]
 
         # First-pass filter — deterministic hard gates (discipline / years / seniority).
         # Applied here, not as a Milvus pre-filter, so they survive the unfiltered retry
