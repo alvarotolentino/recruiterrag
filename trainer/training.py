@@ -11,13 +11,51 @@ from hardware import detect_hardware
 
 logger = logging.getLogger(__name__)
 
-HF_MODEL_ID = os.getenv("HF_MODEL_ID", "Qwen/Qwen3-8B")
+HF_MODEL_ID = os.getenv("HF_MODEL_ID", "Qwen/Qwen3-4B")
 MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT", "storage:9000")
 MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY", "recruiterrag")
 MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY", "recruiterrag")
 ADAPTER_BUCKET = os.getenv("ADAPTER_OUTPUT_BUCKET", "model-adapters")
 MODELS_DIR = Path("/models")
 CONVERT_SCRIPT = "/opt/llama.cpp/convert_lora_to_gguf.py"
+CONVERT_HF_SCRIPT = "/opt/llama.cpp/convert_hf_to_gguf.py"
+BASE_GGUF = MODELS_DIR / "base.gguf"
+BASE_GGUF_OUTTYPE = "q8_0"  # ~4 GB for a 4B model — good quality, fits an 8 GB serving box
+
+
+def ensure_base_gguf(base_model: str) -> bool:
+    """Build /models/base.gguf from the HF base model if it isn't there yet.
+
+    llama.cpp's --lora needs the base model in GGUF; nothing else produces it. Idempotent —
+    skips when a non-empty base.gguf already exists. Runs inside the (long) training job and
+    as an activate-time fallback, so it never blocks on a synchronous HTTP request.
+    """
+    if BASE_GGUF.exists() and BASE_GGUF.stat().st_size > 0:
+        return True
+    MODELS_DIR.mkdir(exist_ok=True)
+    try:
+        from huggingface_hub import snapshot_download
+
+        # Cached from training; downloads on a cold machine (config + weights needed here).
+        base_dir = snapshot_download(base_model)
+    except Exception as exc:
+        logger.error("base.gguf: could not resolve base model %s: %s", base_model, exc)
+        return False
+    tmp_out = f"{BASE_GGUF}.tmp"
+    try:
+        subprocess.run(
+            ["python", CONVERT_HF_SCRIPT, base_dir, "--outfile", tmp_out, "--outtype", BASE_GGUF_OUTTYPE],
+            check=True, capture_output=True, text=True, timeout=3600,
+        )
+        os.replace(tmp_out, BASE_GGUF)  # atomic — llamacpp never sees a half-written file
+        logger.info("base.gguf built from %s (%s)", base_model, BASE_GGUF_OUTTYPE)
+        return True
+    except subprocess.CalledProcessError as exc:
+        logger.error("base.gguf build failed (exit %s): %s", exc.returncode, (exc.stderr or "")[-2000:])
+        return False
+    except Exception as exc:
+        logger.error("base.gguf build failed: %s", exc)
+        return False
 
 
 def _build_dataset(method: str, examples: list[dict], tokenizer):
@@ -124,6 +162,12 @@ def _run_training(run: dict) -> None:
         trainer_db.mark_failed(run_id, hw.message)
         return
 
+    # Ampere+ tf32 matmuls — free ~1.5–2x on GEMMs vs fp32 accumulate, no accuracy cost here.
+    if hw.device == "cuda":
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        torch.set_float32_matmul_precision("high")
+
     trainer_db.mark_started(run_id)
     examples = trainer_db.get_examples(run["dataset_id"])
     method = run["method"]
@@ -134,7 +178,12 @@ def _run_training(run: dict) -> None:
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    model_kwargs: dict = {"torch_dtype": torch.bfloat16 if hw.device == "cuda" else torch.float32}
+    model_kwargs: dict = {
+        "torch_dtype": torch.bfloat16 if hw.device == "cuda" else torch.float32,
+        # SDPA = PyTorch fused scaled-dot-product attention (flash/mem-efficient CUDA kernels
+        # under the hood). flash_attn-2 isn't installed; SDPA gives most of the benefit.
+        "attn_implementation": "sdpa" if hw.device == "cuda" else "eager",
+    }
     if use_qlora:
         from transformers import BitsAndBytesConfig
 
@@ -143,6 +192,7 @@ def _run_training(run: dict) -> None:
             bnb_4bit_quant_type="nf4",
             bnb_4bit_use_double_quant=True,
             bnb_4bit_compute_dtype=torch.bfloat16,
+            bnb_4bit_quant_storage=torch.bfloat16,  # bf16-packed 4-bit → faster dequant kernels
         )
     model = AutoModelForCausalLM.from_pretrained(base_model, **model_kwargs)
 
@@ -161,6 +211,9 @@ def _run_training(run: dict) -> None:
 
     output_dir = tempfile.mkdtemp(prefix=f"run_{run_id}_")
     progress = ProgressCallback(run_id)
+    # Memory-conservative defaults: an 8B model in QLoRA + DPO is very tight on 8 GB GPUs.
+    # Gradient checkpointing trades compute for activation memory; the paged 8-bit optimizer
+    # avoids spikes that surface as "CUDA illegal memory access" near the end of a run.
     common = dict(
         output_dir=output_dir,
         num_train_epochs=run["epochs"],
@@ -170,6 +223,10 @@ def _run_training(run: dict) -> None:
         logging_steps=1,
         save_strategy="no",
         report_to=[],
+        gradient_checkpointing=True,
+        gradient_checkpointing_kwargs={"use_reentrant": False},
+        bf16=hw.device == "cuda",
+        optim="paged_adamw_8bit" if use_qlora else "adamw_torch",
     )
 
     if method == "sft":
@@ -177,7 +234,7 @@ def _run_training(run: dict) -> None:
 
         trainer = SFTTrainer(
             model=model,
-            args=SFTConfig(**common),
+            args=SFTConfig(**common, max_length=1024),
             train_dataset=dataset,
             peft_config=peft_config,
             callbacks=[progress.callback],
@@ -187,7 +244,7 @@ def _run_training(run: dict) -> None:
 
         trainer = DPOTrainer(
             model=model,
-            args=DPOConfig(**common),
+            args=DPOConfig(**common, max_length=1024),
             train_dataset=dataset,
             processing_class=tokenizer,
             peft_config=peft_config,
@@ -212,6 +269,9 @@ def _run_training(run: dict) -> None:
     gguf_local = _convert_to_gguf(output_dir, base_model)
     adapter_path, gguf_path = _upload_artifacts(run_id, output_dir, gguf_local, examples)
 
+    # Build the base GGUF now (inside the long job, no HTTP timeout) so Activate is instant.
+    ensure_base_gguf(base_model)
+
     metrics = {
         "train_loss": train_loss,
         "loss_curve": [
@@ -225,15 +285,26 @@ def _run_training(run: dict) -> None:
 
 def _convert_to_gguf(adapter_dir: str, base_model: str) -> str | None:
     out_path = str(Path(adapter_dir) / "adapter.gguf")
+    # convert_lora_to_gguf's --base wants a LOCAL directory with the base model's config
+    # (an HF repo id is rejected — it os.listdir()s the value). The base was just fetched for
+    # training, so resolve its cached snapshot dir and pass that (offline-safe).
+    base_arg = base_model
     try:
-        subprocess.run(
-            ["python", CONVERT_SCRIPT, adapter_dir, "--outfile", out_path, "--base", base_model],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=1800,
-        )
+        from huggingface_hub import snapshot_download
+
+        base_arg = snapshot_download(base_model, local_files_only=True)
+    except Exception as exc:
+        logger.warning("could not resolve local base snapshot for %s (%s); falling back to --base-model-id", base_model, exc)
+        base_arg = None
+
+    cmd = ["python", CONVERT_SCRIPT, adapter_dir, "--outfile", out_path]
+    cmd += ["--base", base_arg] if base_arg else ["--base-model-id", base_model]
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=1800)
         return out_path
+    except subprocess.CalledProcessError as exc:
+        logger.warning("GGUF conversion failed (exit %s): %s", exc.returncode, (exc.stderr or "")[-2000:])
+        return None
     except Exception as exc:
         logger.warning("GGUF conversion failed: %s", exc)
         return None
@@ -265,12 +336,22 @@ def _upload_artifacts(run_id: str, adapter_dir: str, gguf_local: str | None,
 
 
 def stage_adapter(run_id: str) -> bool:
-    """Copy the run's GGUF adapter into /models/adapter.gguf for the llamacpp service."""
+    """Copy the run's GGUF adapter into /models/adapter.gguf for the llamacpp service.
+
+    Also ensures /models/base.gguf exists (fallback if it wasn't built during the run), so
+    llamacpp has both files it needs after a single Activate.
+    """
     from minio import Minio
+
+    run = trainer_db.get_run(run_id)
+    base_model = (run or {}).get("base_model") or HF_MODEL_ID
+    MODELS_DIR.mkdir(exist_ok=True)
+    if not ensure_base_gguf(base_model):
+        logger.error("cannot activate run %s: base.gguf is missing and could not be built", run_id)
+        return False
 
     client = Minio(MINIO_ENDPOINT, access_key=MINIO_ACCESS_KEY,
                    secret_key=MINIO_SECRET_KEY, secure=False)
-    MODELS_DIR.mkdir(exist_ok=True)
     try:
         client.fget_object(ADAPTER_BUCKET, f"{run_id}/adapter.gguf", str(MODELS_DIR / "adapter.gguf"))
         return True
