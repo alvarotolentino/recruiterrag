@@ -5,7 +5,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile
 from pydantic import BaseModel
-from sqlmodel import Session, select
+from sqlmodel import Session, delete, select
 from sse_starlette.sse import EventSourceResponse
 
 from ..config import settings
@@ -346,17 +346,16 @@ def delete_candidate(candidate_id: str, session: Session = Depends(get_session))
     candidate = session.get(Candidate, candidate_id)
     if candidate is None:
         raise HTTPException(404, "Candidate not found")
-    with session.no_autoflush:
-        pcs = session.exec(select(PipelineCandidate).where(PipelineCandidate.candidate_id == candidate_id)).all()
-        for pc in pcs:
-            for h in session.exec(select(StageHistory).where(StageHistory.pipeline_cand_id == pc.id)).all():
-                session.delete(h)
-            for n in session.exec(select(PipelineNote).where(PipelineNote.pipeline_cand_id == pc.id)).all():
-                session.delete(n)
-            session.delete(pc)
-        for tag in session.exec(select(TrainingTag).where(TrainingTag.candidate_id == candidate_id)).all():
-            session.delete(tag)
-        session.delete(candidate)
+    # Delete children before parents in explicit FK order. Bulk delete() statements
+    # are emitted in the order written, unlike ORM session.delete() which the unit of
+    # work may reorder (no relationship() is declared to teach it the dependency).
+    pc_ids = session.exec(select(PipelineCandidate.id).where(PipelineCandidate.candidate_id == candidate_id)).all()
+    if pc_ids:
+        session.exec(delete(StageHistory).where(StageHistory.pipeline_cand_id.in_(pc_ids)))
+        session.exec(delete(PipelineNote).where(PipelineNote.pipeline_cand_id.in_(pc_ids)))
+    session.exec(delete(PipelineCandidate).where(PipelineCandidate.candidate_id == candidate_id))
+    session.exec(delete(TrainingTag).where(TrainingTag.candidate_id == candidate_id))
+    session.exec(delete(Candidate).where(Candidate.id == candidate_id))
     session.commit()
     try:
         milvus_client.delete_candidate(candidate_id)
